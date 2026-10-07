@@ -276,3 +276,6 @@ FTMP_STORE:
 
     ret
 ```
+
+### FAC_ADD
+Adds to FAC given a pointer to the S11E4 structure to add from. Uses the FTMP Load to extract contents then FTMP Store
