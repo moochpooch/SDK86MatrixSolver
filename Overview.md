@@ -1,12 +1,23 @@
+## TODO
+- Change subtraction and addition functions to support different signs
+- Dynamic loading and variable order matrices
+- Optimize routines (?) <i dont want to>
+- Higher precision 
+- Optmize FP routines to not call FTMP load on every operation if the same SI element is already loaded. 
+
 ## Memory Structure
 #### S11E4 Structure
 The floating point representation is 16 bits so that it can be easily stored in a standard 16 bit register,
+```
 [ 1 bit sign | 11 bit magnitude | 4 bit signed exponent ]
+```
 #### FAC
 The S11E4 structures can be unpacked into more precise implementation for operation. In memory, there is one general purpose "floating point register", called the FAC. Similar to how PDP-1 systems have just one AC register to do most of the work, the FAC works in a similar manner. 
 
 The general structure of the FAC is 33 bits, where one bit is signed, and the rest are magnitude. 
+```
 [ 1 bit sign (1 byte, 1 bit used) | 8 bit exp | 32 bit magnitude ] = 6 bytes
+```
 
 Like the PDP-1, this general structure introduces -0's. To fix this, during any given operation where FAC is reassigned, a sub routine runs that checks if the maginute is all 0's; if it's found to be the case, the routine will set the sign bit to 0 as well. The general algorithm is as follows:
 ```asm
@@ -97,6 +108,10 @@ MATRIX_ADDR:
 ```
 
 ## FP Functions
+### Considerations/Personal Notes
+#### Scalars
+One of the major architectural challenges when designing library that uses a primary FAC as the main reg and FTMP as a scratch reg is that it becomes burden to decide how things like $A_{ij} \leftarrow A_{ij} - \Alpha A{kj}$ should work. There are various solutions, one is to stop treating FTMP like a scratch reg and rather a permanent stateful one. Another is to treat the functions the same but use FAC as a temporary place for FTMP, then multiply by a scalar, then swap back into FTMP. The former would force me to redesign this, and I don't want to since PDP-1 like stuff is pretty dang cool. The latter could work, but it has high overhead and I'd need to redesign how FTMP_LOAD handles itself; if the plan is to introduce arbitrary scalars, then we risk losing what was held at FAC. This is unless we create a small place in memory for scratch S11E4 structures. The store function already converts into that type, then for the the arbitrary scalars, you could just use another alpha reg to write a magnitude, exponent, then point SI to that location.
+
 ### FAC_LOAD
 Converts the S11E4 into a 33-bit FAC representation. The function also assumed that the SI is pointing to the element that should be unpacked and loaded into FAC.
 
@@ -104,6 +119,7 @@ Converts the S11E4 into a 33-bit FAC representation. The function also assumed t
 FAC_LOAD:
     mov ax, [si]        ; Use AX as the point to extract from using bx
 
+.extract_sign:
     mov bl, ah
     shr bl, 1           ; extract the high byte of ah, then shift 7 to isolate sign bit
     shr bl, 1 
@@ -115,6 +131,7 @@ FAC_LOAD:
 
     mov [FAC_SIGN], bl  ; Store the sign bit into FAC_SIGN
 
+.extract_magnitude:
     mov bx, ax
     and bx, 7FF0h               ; Clear low 4 bits and high 1 bit
     shr bx, 1                   ; Shift by 4 to allign mag to lower bits
@@ -125,6 +142,7 @@ FAC_LOAD:
     mov [FAC_MAG_LO], bx        ; Store the unpacked mag into the FAC low memory
     mov word [FAC_MAG_HI], 0    ; Clear the high memory space
 
+.extract_exponent:
     mov bl, al                  ; Move the exponent into b low
     and bl, 0Fh                 ; Clear high nibble, keep low since we only need the low 4 bits
     
@@ -148,6 +166,7 @@ Same thing as FAC_LOAD but for the tmp register
 FTMP_LOAD:
     mov ax, [si]        ; Use AX as the point to extract from using bx
 
+.extract_sign:
     mov bl, ah
     shr bl, 1           ; extract the high byte of ah, then shift 7 to isolate sign bit
     shr bl, 1 
@@ -159,6 +178,7 @@ FTMP_LOAD:
 
     mov [FTMP_SIGN], bl  ; Store the sign bit into FAC_SIGN
 
+.extract_magnitude:
     mov bx, ax
     and bx, 7FF0h               ; Clear low 4 bits and high 1 bit
     shr bx, 1                   ; Shift by 4 to allign mag to lower bits
@@ -169,6 +189,7 @@ FTMP_LOAD:
     mov [FTMP_MAG_LO], bx        ; Store the unpacked mag into the FAC low memory
     mov word [FTMP_MAG_HI], 0    ; Clear the high memory space
 
+.extract_exponent:
     mov bl, al                  ; Move the exponent into b low
     and bl, 0Fh                 ; Clear high nibble, keep low since we only need the low 4 bits
     
@@ -276,6 +297,105 @@ FTMP_STORE:
 
     ret
 ```
+### EXP_ALIGN
+Aligns the exponents and magnitudes on either the FTMP or FAC so that addition and subtraction operations are possible.
+```asm
+.find_smallest_exp:
+    mov al, [FAC_EXP]
+    cmp al, [FTMP_EXP]
+
+    jl .shift_fac_exp           ; FAC exponent is smaller
+    jg .shift_ftmp_exp          ; FTMP exponent is smalelr
+    jmp .addition               ; already equal
+
+.shift_ftmp_exp:                ; Exponent shifting done on ftmp
+    mov bl, [FAC_EXP]           ; Load FAC_EXP into bl for optimization, pointless right now, but im new to this so chill
+
+    mov dx, [FTMP_MAG_HI]
+    mov ax, [FTMP_MAG_LO]
+
+.ftmp_loop:                     ; Loop to shift ftmp exponent
+    cmp [FTMP_EXP], bl
+    je .ftmp_done
+
+    add byte [FTMP_EXP], 1      ; Add one to increase the exponent
+
+    shr dx, 1                   ; Shift the magnitude to match the increase in exponent
+    rcr ax, 1
+
+    jmp .ftmp_loop
+
+.ftmp_done:                     ; Store magnitude values
+    mov [FTMP_MAG_HI], dx
+    mov [FTMP_MAG_LO], ax
+    
+    jmp .end
+
+.shift_fac_exp:
+    mov bl, [FTMP_EXP] 
+
+    mov dx, [FAC_MAG_HI]
+    mov ax, [FAC_MAG_LO]
+    
+.fac_loop:                      ; Loop to shift ftmp exponent
+    cmp [FAC_EXP], bl
+    je .fac_done
+
+    add byte [FAC_EXP], 1       ; Add one to increase the exponent
+
+    shr dx, 1                   ; Shift the magnitude to match the increase in exponent
+    rcr ax, 1
+
+    jmp .fac_loop
+
+.fac_done:
+    mov [FAC_MAG_HI], dx        ; Store magnitude values
+    mov [FAC_MAG_LO], ax
+
+    jmp .end
+
+.end:
+    ret
+```
 
 ### FAC_ADD
-Adds to FAC given a pointer to the S11E4 structure to add from. Uses the FTMP Load to extract contents then FTMP Store
+Takes the S11E4 element pointed to by SI then adds its unpacked value to FAC. The original SI pointed value will remain unaffected.
+```asm
+FP_ADD:
+    call FTMP_LOAD              ; Load pointed to value into FTMP
+    call EXP_ALIGN              ; Align exponents and adjust mags
+
+.addition:
+    mov ax, [FAC_MAG_LO]        ; Load the regs with FAC
+    mov dx, [FAC_MAG_HI]
+    
+    add ax, [FTMP_MAG_LO]       ; Add low mags together
+    adc dx, [FTMP_MAG_HI]       ; Important use of adc, if there was a carry on the low words, 1 should be added to the higher mag
+    
+    mov [FAC_MAG_LO], ax        ; Store final values
+    mov [FAC_MAG_HI], dx
+
+    ret
+```
+### FAC_SUB
+Takes the S11E4 element pointed to by SI then subtracts its unpacked value from FAC. The original SI pointed value will remain unaffected.
+```asm
+FAC_SUB:
+    call FTMP_LOAD              ; Load ftmp and align exponents
+    call EXP_ALIGN
+
+.subtraction:
+    mov ax, [FAC_MAG_LO]        ; Load regs
+    mov dx, [FAC_MAG_HI]
+
+    sub ax, [FTMP_MAG_LO]       ; Subtract low mags, then ensure you borrow when dealing with high
+    sbb dx, [FTMP_MAG_HI]
+
+    mov [FAC_MAG_LO], ax        ; Store result back into FAC
+    mov [FAC_MAG_HI], dx
+
+    ret
+```
+
+### FAC_MUL
+
