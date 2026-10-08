@@ -40,8 +40,16 @@ FP_SUB  ; FAC = FAC - [SI]
 FP_MUL  ; FAC = FAC * [SI]
 FP_DIV  ; FAC = FAC / [SI]
 FP_STORE; [DI] = FAC
+
+FP_SAVE ; [SI] -> FSRC
+FP_RES  ; [SI] <- FSRC
+
+; More internal functions not to be accessed in normal use
+EXP_ALIGN
 ```
-The A reg acts like an accumalator register, where the A register is added to, subtracted by, etc. In our actual program, FA shall be a fixed register.
+FP names are general purpose, in actual implementation the FP name will represent the a specific action regarding a register, e.g. FAC_MUL instead of FP_MUL since the operation affects FACs memory.
+
+The A reg acts like an accumalator register, where the A register is added to, subtracted by, etc. In the program, FAC will act as the main register for operands, FTMP will act as a register that holds a second number for operations, and FSRC will act as a temporary place to store FAC. There is also quick swaps between the regs and various functions designed to allow for more flexible register management.
 
 #### Matrix Memory
 The matrix will be stored flat in an augmented format; at least for the first implementation. It will also be hard coded, so the order is known. In memory, it would look like:
@@ -80,10 +88,20 @@ FTMP_EXP:    db 0
 FTMP_MAG_LO: dw 0
 FTMP_MAG_HI: dw 0
 
+FSCR_SIGN:   db 0
+FSCR_EXP:    db 0
+FSCR_MAG_LO: dw 0
+FSCR_MAG_HI: dw 0
 ; Gaussian elimination expanded floating point
 FMULTI:      dw 0       ; packed S11E4 multiplier
+
+; Buffers for multiplication
+FMUL_0: dw 0       ; bits 0-15
+FMUL_1: dw 0       ; bits 16-31
+FMUL_2: dw 0       ; bits 32-47
+FMUL_3: dw 0       ; bits 48-63
+
 ```
-In total, it equates to 27 bytes of reserved memory.
 
 ## Matrix Functions
 ### Addressing
@@ -110,7 +128,7 @@ MATRIX_ADDR:
 ## FP Functions
 ### Considerations/Personal Notes
 #### Scalars
-One of the major architectural challenges when designing library that uses a primary FAC as the main reg and FTMP as a scratch reg is that it becomes burden to decide how things like $A_{ij} \leftarrow A_{ij} - \Alpha A{kj}$ should work. There are various solutions, one is to stop treating FTMP like a scratch reg and rather a permanent stateful one. Another is to treat the functions the same but use FAC as a temporary place for FTMP, then multiply by a scalar, then swap back into FTMP. The former would force me to redesign this, and I don't want to since PDP-1 like stuff is pretty dang cool. The latter could work, but it has high overhead and I'd need to redesign how FTMP_LOAD handles itself; if the plan is to introduce arbitrary scalars, then we risk losing what was held at FAC. This is unless we create a small place in memory for scratch S11E4 structures. The store function already converts into that type, then for the the arbitrary scalars, you could just use another alpha reg to write a magnitude, exponent, then point SI to that location.
+One of the major architectural challenges when designing library that uses a primary FAC as the main reg and FTMP as a scratch reg is that it becomes burden to decide how things like $A_{ij} \leftarrow A_{ij} - \alpha A_{kj}$ should work. There are various solutions, one is to stop treating FTMP like a scratch reg and rather a permanent stateful one. Another is to treat the functions the same but use FAC as a temporary place for FTMP, then multiply by a scalar, then swap back into FTMP. The former would force me to redesign this, and I don't want to since PDP-1 like stuff is pretty dang cool. The latter could work, but it has high overhead and I'd need to redesign how FTMP_LOAD handles itself; if the plan is to introduce arbitrary scalars, then we risk losing what was held at FAC. This is unless we create a small place in memory for scratch S11E4 structures. The store function already converts into that type, then for the the arbitrary scalars, you could just use another alpha reg to write a magnitude, exponent, then point SI to that location.
 
 ### FAC_LOAD
 Converts the S11E4 into a 33-bit FAC representation. The function also assumed that the SI is pointing to the element that should be unpacked and loaded into FAC.
@@ -358,6 +376,9 @@ Aligns the exponents and magnitudes on either the FTMP or FAC so that addition a
     ret
 ```
 
+### FAC_NORM
+Normalizes FAC to 
+
 ### FAC_ADD
 Takes the S11E4 element pointed to by SI then adds its unpacked value to FAC. The original SI pointed value will remain unaffected.
 ```asm
@@ -398,4 +419,92 @@ FAC_SUB:
 ```
 
 ### FAC_MUL
+Multiply FAC by SI and keep result in FAC, normalization is needed after every multiplication so that a result can fit in a 32 bit magnitude field.
+```asm
+FAC_MUL:
+    call FTMP_LOAD
 
+.compute_sign:
+    mov al, [FAC_SIGN]
+    xor al, [FTMP_SIGN]
+
+    mov [FAC_SIGN], al
+
+.multiply_mags:
+    ; Clear upper result words
+    mov word [FMUL_0], 0
+    mov word [FMUL_1], 0
+    mov word [FMUL_2], 0
+    mov word [FMUL_3], 0
+
+    ; FAC_LO * FTMP_LO
+    ax, [FAC_MAG_LO]
+    mul word [FTMP_MAG_LO]
+
+    mov [FMUL_0], ax
+    mov [FMUL_1], dx
+
+
+    ; FAC_HI * FTMP_LO
+    mov ax, [FAC_MAG_HI]
+    mul word [FTMP_MAG_LO]
+
+    add [FMUL_1], ax
+    adc dx, 0
+    mov [FMUL_2], dx
+
+    ; FAC_LO * FTMP_HI
+    mov ax, [FAC_MAG_LO]
+    mul word [FTMP_MAG_HI]
+
+    add [FMUL_1], ax
+    adc [FMUL_2], dx
+    adc word [FMUL_3], 0
+
+    ; FAC_HI * FTMP_HI
+    mov ax, [FAC_MAG_HI]
+    mul word [FTMP_MAG_HI]
+
+    add [FMUL_2], ax
+    adc [FMUL_3], dx
+```
+
+### FAC_SAVE
+Moves FAC reg into FSRC, memory in FSRC is deleted and FAC retains previous memory.
+```asm
+FAC_SAVE:
+    
+    mv al, [FAC_SIGN]
+    mv ah, [FAC_EXP]
+
+    mv [FSRC_SIGN], al
+    mv [FSRC_EXP], ah
+
+    mv ax, [FAC_MAG_HI]
+    mv bx, [FAC_MAG_LO]
+
+    mv [FSRC_MAG_HI], ax
+    mv [FSRC_MAG_LO], bx
+
+    ret
+```
+
+### FAC_RES
+Moves memory from FSRC to FAC, memory in FAC is deleted and FSRC retains previous memory.
+```asm
+FAC_RES:
+    
+    mv al, [FSRC_SIGN]
+    mv ah, [FSRC_EXP]
+
+    mv [FAC_SIGN], al
+    mv [FAC_EXP], ah
+
+    mv ax, [FSRC_MAG_HI]
+    mv bx, [FSRC_MAG_LO]
+
+    mv [FAC_MAG_HI], ax
+    mv [FAC_MAG_LO], bx
+
+    ret
+```
