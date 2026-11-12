@@ -4,6 +4,8 @@
 - Optimize routines (?) <i dont want to>
 - Higher precision 
 - Optmize FP routines to not call FTMP load on every operation if the same SI element is already loaded. 
+- Add large intermmediate 64 bit result then implement FAC_NORMALIZE to fit into 32 bit
+- Compute error and adjust chained results
 
 ## Memory Structure
 #### S11E4 Structure
@@ -114,7 +116,7 @@ MATRIX_ADDR:
     mov dx, ax      ; set dx 
     shl ax, 1       ; 2*r
     add ax, dx      ; 3*r
-    sl ax, 1        ; 6*r
+    shl ax, 1        ; 6*r
 
     shl bx, 1       ; 2*c
     add ax, bx      ; final address for given element
@@ -318,6 +320,7 @@ FTMP_STORE:
 ### EXP_ALIGN
 Aligns the exponents and magnitudes on either the FTMP or FAC so that addition and subtraction operations are possible.
 ```asm
+EXP_ALIGN:
 .find_smallest_exp:
     mov al, [FAC_EXP]
     cmp al, [FTMP_EXP]
@@ -376,8 +379,8 @@ Aligns the exponents and magnitudes on either the FTMP or FAC so that addition a
     ret
 ```
 
-### FAC_NORM
-Normalizes FAC to 
+### FAC_NORM (NOT IN MVP)
+Normalizes FAC intermmediate result into 32-bit.
 
 ### FAC_ADD
 Takes the S11E4 element pointed to by SI then adds its unpacked value to FAC. The original SI pointed value will remain unaffected.
@@ -438,7 +441,7 @@ FAC_MUL:
     mov word [FMUL_3], 0
 
     ; FAC_LO * FTMP_LO
-    ax, [FAC_MAG_LO]
+    mov ax, [FAC_MAG_LO]
     mul word [FTMP_MAG_LO]
 
     mov [FMUL_0], ax
@@ -468,23 +471,23 @@ FAC_MUL:
     add [FMUL_2], ax
     adc [FMUL_3], dx
 ```
-
+The algorithm follows (XHI * YHI) * 2^32 + (XHI * YLO + XLO * YHI) * 2^16 + (XLO * YLO); works based on expansion of having to registers defined as X = XHi*2^16 + XLO.
 ### FAC_SAVE
 Moves FAC reg into FSRC, memory in FSRC is deleted and FAC retains previous memory.
 ```asm
 FAC_SAVE:
     
-    mv al, [FAC_SIGN]
-    mv ah, [FAC_EXP]
+    mov al, [FAC_SIGN]
+    mov ah, [FAC_EXP]
 
-    mv [FSRC_SIGN], al
-    mv [FSRC_EXP], ah
+    mov [FSRC_SIGN], al
+    mov [FSRC_EXP], ah
 
-    mv ax, [FAC_MAG_HI]
-    mv bx, [FAC_MAG_LO]
+    mov ax, [FAC_MAG_HI]
+    mov bx, [FAC_MAG_LO]
 
-    mv [FSRC_MAG_HI], ax
-    mv [FSRC_MAG_LO], bx
+    mov [FSRC_MAG_HI], ax
+    mov [FSRC_MAG_LO], bx
 
     ret
 ```
