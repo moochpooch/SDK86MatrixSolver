@@ -90,10 +90,10 @@ FTMP_EXP:    db 0
 FTMP_MAG_LO: dw 0
 FTMP_MAG_HI: dw 0
 
-FSCR_SIGN:   db 0
-FSCR_EXP:    db 0
-FSCR_MAG_LO: dw 0
-FSCR_MAG_HI: dw 0
+FSRC_SIGN:   db 0
+FSRC_EXP:    db 0
+FSRC_MAG_LO: dw 0
+FSRC_MAG_HI: dw 0
 ; Gaussian elimination expanded floating point
 FMULTI:      dw 0       ; packed S11E4 multiplier
 
@@ -233,8 +233,8 @@ Stores a value from FAC into S11E4 given that the SI pointer is pointing to the 
 FAC_STORE:
     mov ax, [FAC_MAG_LO]
     mov dx, [FAC_MAG_HI]
-    
-    mov cx, 21              ; loop 21 times to make the 32 bit memory into 11 bits
+    mov cl, [FAC_EXP]
+
 .normalize:
     cmp dx, 0
     jne .shift
@@ -245,19 +245,22 @@ FAC_STORE:
 .shift:
     shr dx, 1
     rcr ax, 1
-    inc byte [FAC_EXP]
+    inc cl
     jmp .normalize
 
 .normalized:
+    ; Move mag into bits 4-14
     shl ax, 1
     shl ax, 1
     shl ax, 1
     shl ax, 1
 
-    mov bl, [FAC_EXP]       ; load and clear lower 4 of exponent, then or with al
+    ; Exponent in bits 0-3
+    mov bl, cl       ; load and clear lower 4 of exponent, then or with al
     and bl, 0Fh
     or al, bl
 
+    ; Sign bit 15
     mov bl, [FAC_SIGN]     ; Load the sign byte into bl
     shl bl, 1              ; Shift left by 7 to get sign bit to left side of reg
     shl bl, 1
@@ -266,10 +269,9 @@ FAC_STORE:
     shl bl, 1
     shl bl, 1
     shl bl, 1
-
     or ah, bl             ; Join bl to ah    
-    mov [si], ax
 
+    mov [si], ax
     ret
 ```
 ### FTMP Store
@@ -327,7 +329,7 @@ EXP_ALIGN:
 
     jl .shift_fac_exp           ; FAC exponent is smaller
     jg .shift_ftmp_exp          ; FTMP exponent is smalelr
-    jmp .addition               ; already equal
+    jmp .end                    ; already equal
 
 .shift_ftmp_exp:                ; Exponent shifting done on ftmp
     mov bl, [FAC_EXP]           ; Load FAC_EXP into bl for optimization, pointless right now, but im new to this so chill
@@ -470,8 +472,47 @@ FAC_MUL:
 
     add [FMUL_2], ax
     adc [FMUL_3], dx
+
+    ; Exponent A*B = (M_A * M_B) * 2^(E_A + E_B)
+    mov al, [FAC_EXP]
+    add al, [FTMP_EXP]
+    mov [FAC_EXP], al
+
+.normalize:
+    ; If either FMUL_2, FMUL_3 have some number stored, then keep shifting
+    mov ax, [FMUL_3]
+    or ax, [FMUL_2]
+    jz .normalized
+
+    ; NASM doesn't automatically remember allocation type of memory
+    shr word [FMUL_3], 1
+    rcr word [FMUL_2], 1
+    rcr word [FMUL_1], 1
+    rcr word [FMUL_0], 1
+
+    inc byte [FAC_EXP]
+    jmp .normalize
+
+.normalized:
+    ; Move multiplication result to FAC
+    mov ax, [FMUL_1]
+    mov bx, [FMUL_0]
+
+    mov [FAC_MAG_LO], bx
+    mov [FAC_MAG_HI], ax
+
+    ; Check if mag is 0, if yes, clear exponent to prevent -0
+    mov ax, [FAC_MAG_LO]
+    or ax, [FAC_MAG_HI]
+    jnz .done
+
+    mov byte [FAC_SIGN], 0
+    mov byte [FAC_EXP], 0
+
+    .done:
+    ret
 ```
-The algorithm follows (XHI * YHI) * 2^32 + (XHI * YLO + XLO * YHI) * 2^16 + (XLO * YLO); works based on expansion of having to registers defined as X = XHi*2^16 + XLO.
+The algorithm follows (XHI * YHI) * 2^32 + (XHI * YLO + XLO * YHI) * 2^16 + (XLO * YLO). Works on expansion of two registers defined as X = XHI*2^16 + XLO.
 ### FAC_SAVE
 Moves FAC reg into FSRC, memory in FSRC is deleted and FAC retains previous memory.
 ```asm
@@ -497,17 +538,17 @@ Moves memory from FSRC to FAC, memory in FAC is deleted and FSRC retains previou
 ```asm
 FAC_RES:
     
-    mv al, [FSRC_SIGN]
-    mv ah, [FSRC_EXP]
+    mov al, [FSRC_SIGN]
+    mov ah, [FSRC_EXP]
 
-    mv [FAC_SIGN], al
-    mv [FAC_EXP], ah
+    mov [FAC_SIGN], al
+    mov [FAC_EXP], ah
 
-    mv ax, [FSRC_MAG_HI]
-    mv bx, [FSRC_MAG_LO]
+    mov ax, [FSRC_MAG_HI]
+    mov bx, [FSRC_MAG_LO]
 
-    mv [FAC_MAG_HI], ax
-    mv [FAC_MAG_LO], bx
+    mov [FAC_MAG_HI], ax
+    mov [FAC_MAG_LO], bx
 
     ret
 ```
